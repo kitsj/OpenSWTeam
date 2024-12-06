@@ -13,7 +13,6 @@
 
 // 플래그 및 mutex
 int nfc_flag = 0;
-int bluetooth_flag = 0;
 pthread_mutex_t flag_mutex;
 
 static const char* UART2_DEV = "/dev/ttyAMA0"; // UART2
@@ -51,15 +50,50 @@ void one_two_Phase_Rotate_Angle(float angle, int dir) {
     }
 }
 
+// 블루투스 입력 함수
+int bluetooth_input(int fd) {
+    char buffer[100];
+    int index = 0;
+    char dat;
+
+    // 비밀번호 입력 안내 메시지 전송
+    send_message(fd, "비밀번호를 입력해주세요");
+
+    while (1) {
+        if (serialDataAvail(fd)) {
+            dat = serialGetchar(fd);
+            if (dat == '\n' || dat == '\r') { // 줄바꿈 문자로 입력 완료 확인
+                buffer[index] = '\0'; // 문자열 종료
+                if (strcmp(buffer, "1234") == 0) { // 비밀번호 검증
+                    printf("블루투스 입력 성공\n");
+                    return 1; // 성공
+                } else {
+                    printf("잘못된 비밀번호 입력\n");
+                    send_message(fd, "잘못된 비밀번호입니다. 다시 입력해주세요");
+                    index = 0; // 입력 초기화
+                    memset(buffer, '\0', sizeof(buffer));
+                }
+            } else {
+                if (index < sizeof(buffer) - 1) { // 버퍼 오버플로 방지
+                    buffer[index++] = dat;
+                }
+            }
+        }
+        delay(10);
+    }
+    return 0; // 실패
+}
+
 // NFC 감지 스레드
 void* nfc_task(void* arg) {
     pid_t pid;
     int status;
     char* argv[] = { "nfc-poll", NULL };
+    int fd = *(int*)arg;
 
     while (1) {
         pthread_mutex_lock(&flag_mutex);
-        if (bluetooth_flag == 0 && nfc_flag == 0) { // 블루투스 처리 중에는 NFC 입력 불가
+        if (nfc_flag == 0) {
             pthread_mutex_unlock(&flag_mutex);
             printf("NFC 감지 중...\n");
             if (posix_spawn(&pid, "/bin/nfc-poll", NULL, NULL, argv, environ) == 0) {
@@ -68,6 +102,17 @@ void* nfc_task(void* arg) {
                     nfc_flag = 1; // NFC 인증 성공
                     pthread_mutex_unlock(&flag_mutex);
                     printf("NFC 인증 성공\n");
+
+                    // NFC 인증 성공 후 블루투스 입력 호출
+                    if (bluetooth_input(fd)) {
+                        printf("조건 충족: 모터 작동 시작\n");
+                        one_two_Phase_Rotate_Angle(45, 1); // 스텝모터 45도 회전
+                        printf("작업 완료: 새로운 NFC 입력 대기...\n");
+                    }
+
+                    pthread_mutex_lock(&flag_mutex);
+                    nfc_flag = 0; // NFC 플래그 초기화 (다시 감지 가능)
+                    pthread_mutex_unlock(&flag_mutex);
                 }
             } else {
                 perror("nfc-poll 실행 실패");
@@ -76,73 +121,6 @@ void* nfc_task(void* arg) {
             pthread_mutex_unlock(&flag_mutex);
         }
         sleep(1); // NFC 감지 주기
-    }
-    return NULL;
-}
-
-// 블루투스 입력 스레드
-void* bluetooth_task(void* arg) {
-    int fd = *(int*)arg;
-    char buffer[100];
-    int index = 0;
-    char dat;
-
-    while (1) {
-        pthread_mutex_lock(&flag_mutex);
-        if (nfc_flag == 1 && bluetooth_flag == 0) { // NFC 인증 후에만 블루투스 활성화
-            pthread_mutex_unlock(&flag_mutex);
-
-            // 비밀번호 입력 안내 메시지 전송
-            send_message(fd, "비밀번호를 입력해주세요");
-
-            while (1) {
-                if (serialDataAvail(fd)) {
-                    dat = serialGetchar(fd);
-                    if (dat == '\n' || dat == '\r') { // 줄바꿈 문자로 입력 완료 확인
-                        buffer[index] = '\0'; // 문자열 종료
-                        pthread_mutex_lock(&flag_mutex);
-                        if (strcmp(buffer, "1234") == 0) { // 비밀번호 검증
-                            bluetooth_flag = 1; // 블루투스 입력 성공
-                            pthread_mutex_unlock(&flag_mutex);
-                            printf("블루투스 입력 성공\n");
-                            break;
-                        } else {
-                            pthread_mutex_unlock(&flag_mutex);
-                            // 잘못된 비밀번호 처리
-                            send_message(fd, "잘못된 비밀번호입니다. 다시 입력해주세요");
-                        }
-                        // 입력 초기화
-                        memset(buffer, '\0', sizeof(buffer)); // 버퍼 초기화
-                        index = 0; // 인덱스 초기화
-                    } else {
-                        if (index < sizeof(buffer) - 1) { // 버퍼 오버플로 방지
-                            buffer[index++] = dat;
-                        }
-                    }
-                }
-                delay(10);
-            }
-        } else {
-            pthread_mutex_unlock(&flag_mutex);
-        }
-        delay(10);
-    }
-    return NULL;
-}
-
-// 조건 확인 및 모터 제어 스레드
-void* condition_checker(void* arg) {
-    while (1) {
-        pthread_mutex_lock(&flag_mutex);
-        if (nfc_flag == 1 && bluetooth_flag == 1) {
-            printf("조건 충족: 모터 작동 시작\n");
-            one_two_Phase_Rotate_Angle(45, 1); // 스텝모터 45도 회전
-            nfc_flag = 0; // NFC 플래그 초기화 (다시 감지 가능)
-            bluetooth_flag = 0; // 블루투스 플래그 초기화
-            printf("작업 완료: 새로운 NFC 입력 대기...\n");
-        }
-        pthread_mutex_unlock(&flag_mutex);
-        sleep(1); // 조건 확인 주기
     }
     return NULL;
 }
@@ -163,20 +141,12 @@ int main() {
         pinMode(pin_arr[i], OUTPUT);
     }
 
-    pthread_t nfc_thread, bt_thread, checker_thread;
+    pthread_t nfc_thread;
 
     // NFC 처리 스레드
-    pthread_create(&nfc_thread, NULL, nfc_task, NULL);
-
-    // 블루투스 처리 스레드
-    pthread_create(&bt_thread, NULL, bluetooth_task, &fd_serial);
-
-    // 조건 확인 및 모터 제어 스레드
-    pthread_create(&checker_thread, NULL, condition_checker, NULL);
+    pthread_create(&nfc_thread, NULL, nfc_task, &fd_serial);
 
     pthread_join(nfc_thread, NULL);
-    pthread_join(bt_thread, NULL);
-    pthread_join(checker_thread, NULL);
 
     pthread_mutex_destroy(&flag_mutex);
     serialClose(fd_serial);
