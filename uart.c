@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <time.h>
 #include <string.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -11,14 +10,13 @@
 #include <wiringSerial.h>
 
 #define BAUD_RATE 115200
-#define GPIO1 18
 
 // NFC 및 블루투스 플래그
 int nfc_flag = 0;
 int bluetooth_flag = 0;
 pthread_mutex_t flag_mutex;
 
-static const char* UART2_DEV = "/dev/ttyAMA2"; // UART2
+static const char* UART2_DEV = "/dev/ttyAMA0"; // UART2
 extern char** environ;
 
 // 스텝모터 관련 GPIO 및 설정
@@ -52,16 +50,22 @@ void* nfc_task(void* arg) {
     char* argv[] = { "nfc-poll", NULL };
 
     while (1) {
-        printf("NFC 감지 중...\n");
-        if (posix_spawn(&pid, "/bin/nfc-poll", NULL, NULL, argv, environ) == 0) {
-            if (waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                pthread_mutex_lock(&flag_mutex);
-                nfc_flag = 1; // NFC 인증 성공
-                pthread_mutex_unlock(&flag_mutex);
-                printf("NFC 인증 성공\n");
+        pthread_mutex_lock(&flag_mutex);
+        if (bluetooth_flag == 0 && nfc_flag == 0) { // 블루투스 처리 중에는 NFC 입력 불가
+            pthread_mutex_unlock(&flag_mutex);
+            printf("NFC 감지 중...\n");
+            if (posix_spawn(&pid, "/bin/nfc-poll", NULL, NULL, argv, environ) == 0) {
+                if (waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    pthread_mutex_lock(&flag_mutex);
+                    nfc_flag = 1; // NFC 인증 성공
+                    pthread_mutex_unlock(&flag_mutex);
+                    printf("NFC 인증 성공\n");
+                }
+            } else {
+                perror("nfc-poll 실행 실패");
             }
         } else {
-            perror("nfc-poll 실행 실패");
+            pthread_mutex_unlock(&flag_mutex);
         }
         sleep(1); // NFC 감지 주기
     }
@@ -77,7 +81,7 @@ void* bluetooth_task(void* arg) {
 
     while (1) {
         pthread_mutex_lock(&flag_mutex);
-        if (nfc_flag == 1) { // NFC 인증 성공 시에만 블루투스 활성화
+        if (nfc_flag == 1 && bluetooth_flag == 0) { // NFC 인증 후에만 블루투스 활성화
             pthread_mutex_unlock(&flag_mutex);
             printf("블루투스 입력 대기...\n");
 
@@ -114,6 +118,7 @@ void* condition_checker(void* arg) {
             one_two_Phase_Rotate_Angle(45, 1); // 스텝모터 45도 회전
             nfc_flag = 0; // NFC 플래그 초기화 (다시 감지 가능)
             bluetooth_flag = 0; // 블루투스 플래그 초기화
+            printf("작업 완료: 새로운 NFC 입력 대기...\n");
         }
         pthread_mutex_unlock(&flag_mutex);
         sleep(1); // 조건 확인 주기
