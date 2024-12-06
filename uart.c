@@ -21,6 +21,7 @@ int max_count = 3;   // 하루 복용 횟수 제한
 int today_count = 0; // 오늘 복용 횟수
 int total_count = 0; // 총 복용 횟수
 int flag = 0;        // 복용 가능 플래그
+int nfc_flag = 0;    // NFC 인증 플래그
 
 pthread_mutex_t flag_mutex; // 복용 가능 여부 제어용 mutex
 pthread_mutex_t mid;        // 타이머 및 상태 제어용 mutex
@@ -147,7 +148,6 @@ void* nfc_task(void* arg) {
     pid_t pid;
     int status;
     char* argv[] = { "nfc-poll", NULL };
-    int fd = *(int*)arg;
 
     while (1) {
         pthread_mutex_lock(&flag_mutex);
@@ -176,13 +176,7 @@ void* nfc_task(void* arg) {
 }
 
 int main() {
-    int fd_serial;
-
     if (wiringPiSetupGpio() < 0) return 1;
-    if ((fd_serial = serialOpen(UART2_DEV, BAUD_RATE)) < 0) {
-        printf("UART 초기화 실패\n");
-        return 1;
-    }
 
     pthread_mutex_init(&flag_mutex, NULL);
     pthread_mutex_init(&mid, NULL);
@@ -195,12 +189,12 @@ int main() {
     pthread_t nfc_thread;
 
     // NFC 처리 스레드
-    pthread_create(&nfc_thread, NULL, nfc_task, &fd_serial);
+    pthread_create(&nfc_thread, NULL, nfc_task, NULL);
 
     pthread_join(nfc_thread, NULL);
 
     pthread_mutex_destroy(&flag_mutex);
     pthread_mutex_destroy(&mid);
-    serialClose(fd_serial);
+
     return 0;
 }
