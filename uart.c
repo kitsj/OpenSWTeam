@@ -32,6 +32,14 @@ int one_phase[8][4] = {
     {1, 0, 0, 1},
 };
 
+// 문자열 전송 함수
+void send_message(int fd, const char* msg) {
+    while (*msg) {
+        serialPutchar(fd, *msg++);
+    }
+    serialPutchar(fd, '\n'); // 줄바꿈 문자 추가
+}
+
 // 스텝모터 동작 함수
 void one_two_Phase_Rotate_Angle(float angle, int dir) {
     int steps = angle * (4096 / 360);
@@ -83,23 +91,32 @@ void* bluetooth_task(void* arg) {
         pthread_mutex_lock(&flag_mutex);
         if (nfc_flag == 1 && bluetooth_flag == 0) { // NFC 인증 후에만 블루투스 활성화
             pthread_mutex_unlock(&flag_mutex);
-            printf("블루투스 입력 대기...\n");
 
-            if (serialDataAvail(fd)) {
-                dat = serialGetchar(fd);
-                if (dat == '\n' || dat == '\r') {
-                    buffer[index] = '\0';
-                    if (strcmp(buffer, "1234") == 0) {
-                        pthread_mutex_lock(&flag_mutex);
-                        bluetooth_flag = 1; // 블루투스 입력 성공
-                        pthread_mutex_unlock(&flag_mutex);
-                        printf("블루투스 입력 성공\n");
+            // 비밀번호 입력 안내 메시지 전송
+            send_message(fd, "비밀번호를 입력해주세요");
+
+            while (1) {
+                if (serialDataAvail(fd)) {
+                    dat = serialGetchar(fd);
+                    if (dat == '\n' || dat == '\r') {
+                        buffer[index] = '\0';
+                        if (strcmp(buffer, "1234") == 0) {
+                            pthread_mutex_lock(&flag_mutex);
+                            bluetooth_flag = 1; // 블루투스 입력 성공
+                            pthread_mutex_unlock(&flag_mutex);
+                            printf("블루투스 입력 성공\n");
+                            break;
+                        } else {
+                            // 잘못된 입력 시 다시 요청
+                            send_message(fd, "잘못된 비밀번호입니다. 다시 입력해주세요");
+                        }
+                        memset(buffer, '\0', sizeof(buffer));
+                        index = 0;
+                    } else {
+                        buffer[index++] = dat;
                     }
-                    memset(buffer, '\0', sizeof(buffer));
-                    index = 0;
-                } else {
-                    buffer[index++] = dat;
                 }
+                delay(10);
             }
         } else {
             pthread_mutex_unlock(&flag_mutex);
