@@ -5,24 +5,22 @@
 #include <string.h>
 #include <spawn.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <wiringPi.h>
 #include <softTone.h>
 #include <wiringSerial.h>
 
 #define BAUD_RATE 115200
 
-// 설정값들
-int min_time = 8;   // 최소 대기 시간 (초 단위 예제용)
-int max_time = 20;  // 최대 대기 시간 (초 단위 예제용)
-int max_count = 3;  // 하루 복용 횟수 제한
+// 전역 변수
+int max_count = 3;      // 하루 최대 복용 횟수
+int max_time = 10;      // 최대 대기 시간 (초 단위)
+int today_count = 0;    // 오늘 복용 횟수
+int timer_flag = 0;     // 타이머 상태 (1: 대기 완료, 0: 대기 중)
 
-int today_count = 0; // 오늘 복용 횟수
-int flag = 0;        // 복용 가능 플래그
-int nfc_flag = 0;    // NFC 인증 플래그
-
-pthread_mutex_t flag_mutex; // 플래그 제어 mutex
-pthread_mutex_t mid;        // 타이머 및 상태 제어 mutex
+// 플래그 및 mutex
+int nfc_flag = 0;       // NFC 인증 플래그
+pthread_mutex_t flag_mutex;
+pthread_mutex_t timer_mutex;
 
 static const char* UART2_DEV = "/dev/ttyAMA0"; // UART2
 extern char** environ;
@@ -70,42 +68,13 @@ void music(int gpio) {
     }
 }
 
-// NFC 인증 및 대기 처리
-void* nfc_timer_task(void* arg) {
-    int fd = *(int*)arg;
-    while (1) {
-        pthread_mutex_lock(&flag_mutex);
-        if (nfc_flag == 1) {
-            pthread_mutex_unlock(&flag_mutex);
-
-            // 최대 대기 시간 대기
-            printf("최대 대기 시간(%d초) 대기 중...\n", max_time);
-            sleep(max_time);
-
-            pthread_mutex_lock(&mid);
-            if (today_count >= max_count) {
-                printf("복용 횟수 초과, 부저 울림\n");
-                music(18); // 복용 제한 시 알림음 출력
-                nfc_flag = 0; // NFC 플래그 초기화
-            } else {
-                printf("비밀번호 입력 대기 중...\n");
-                flag = 1; // 복용 가능 플래그 설정
-            }
-            pthread_mutex_unlock(&mid);
-        } else {
-            pthread_mutex_unlock(&flag_mutex);
-        }
-        delay(500); // 주기적 확인
-    }
-    return NULL;
-}
-
 // 블루투스 입력 함수
 int bluetooth_input(int fd) {
     char buffer[100]; // 비밀번호 입력 버퍼
-    int index = 0;
+    int index = 0;    // 버퍼 인덱스 초기화
     char dat;
 
+    // 비밀번호 입력 안내 메시지 전송
     send_message(fd, "비밀번호를 입력해주세요");
 
     memset(buffer, '\0', sizeof(buffer)); // 버퍼 초기화
@@ -114,7 +83,7 @@ int bluetooth_input(int fd) {
         if (serialDataAvail(fd)) {
             dat = serialGetchar(fd);
             if (dat == '\n' || dat == '\r') { // 줄바꿈 문자로 입력 완료 확인
-                buffer[index] = '\0';
+                buffer[index] = '\0'; // 문자열 종료
                 if (strcmp(buffer, "1234") == 0) { // 비밀번호 검증
                     printf("블루투스 입력 성공\n");
                     return 1; // 성공
@@ -122,7 +91,7 @@ int bluetooth_input(int fd) {
                     printf("잘못된 비밀번호 입력\n");
                     send_message(fd, "잘못된 비밀번호입니다. 다시 입력해주세요");
                     memset(buffer, '\0', sizeof(buffer)); // 버퍼 초기화
-                    index = 0;
+                    index = 0; // 인덱스 초기화
                 }
             } else {
                 if (index < sizeof(buffer) - 1) {
@@ -135,7 +104,23 @@ int bluetooth_input(int fd) {
     return 0;
 }
 
-// NFC 태그 및 처리 스레드
+// 타이머 스레드
+void* timer_task(void* arg) {
+    while (1) {
+        pthread_mutex_lock(&timer_mutex);
+        if (timer_flag == 0) { // 타이머 대기 중일 때만 작동
+            printf("타이머 시작: %d초 대기 중...\n", max_time);
+            sleep(max_time); // 대기 시간
+            timer_flag = 1; // 대기 완료 상태 설정
+            printf("타이머 완료: 복용 가능 상태\n");
+        }
+        pthread_mutex_unlock(&timer_mutex);
+        sleep(1);
+    }
+    return NULL;
+}
+
+// NFC 태그 처리 스레드
 void* nfc_task(void* arg) {
     pid_t pid;
     int status;
@@ -152,23 +137,25 @@ void* nfc_task(void* arg) {
                     pthread_mutex_lock(&flag_mutex);
                     nfc_flag = 1; // NFC 인증 성공
                     pthread_mutex_unlock(&flag_mutex);
+                    printf("NFC 인증 성공\n");
 
-                    pthread_mutex_lock(&mid);
-                    if (today_count < max_count && flag == 1) {
-                        pthread_mutex_unlock(&mid);
+                    pthread_mutex_lock(&timer_mutex);
+                    if (timer_flag == 1 && today_count < max_count) { // 타이머 완료 및 복용 가능 상태
+                        timer_flag = 0; // 타이머 리셋
+                        pthread_mutex_unlock(&timer_mutex);
 
-                        if (bluetooth_input(fd)) {
+                        if (bluetooth_input(fd)) { // 비밀번호 입력 성공 시
                             printf("조건 충족: 모터 작동\n");
                             one_two_Phase_Rotate_Angle(45, 1); // 스텝모터 45도 회전
-                            pthread_mutex_lock(&mid);
+                            pthread_mutex_lock(&timer_mutex);
                             today_count++; // 복용 횟수 증가
                             printf("복용 완료: 오늘 복용 횟수 = %d\n", today_count);
-                            pthread_mutex_unlock(&mid);
+                            pthread_mutex_unlock(&timer_mutex);
                         }
                     } else {
-                        pthread_mutex_unlock(&mid);
+                        pthread_mutex_unlock(&timer_mutex);
                         printf("복용 제한: 부저 울림\n");
-                        music(18);
+                        music(18); // 복용 제한 시 알림음 출력
                     }
 
                     pthread_mutex_lock(&flag_mutex);
@@ -196,26 +183,26 @@ int main() {
     }
 
     pthread_mutex_init(&flag_mutex, NULL);
-    pthread_mutex_init(&mid, NULL);
+    pthread_mutex_init(&timer_mutex, NULL);
 
     // GPIO 설정
     for (int i = 0; i < 4; i++) {
         pinMode(pin_arr[i], OUTPUT);
     }
 
-    pthread_t nfc_thread, nfc_timer_thread;
+    pthread_t nfc_thread, timer_thread;
 
     // NFC 처리 스레드
     pthread_create(&nfc_thread, NULL, nfc_task, &fd_serial);
 
-    // NFC 타이머 처리 스레드
-    pthread_create(&nfc_timer_thread, NULL, nfc_timer_task, &fd_serial);
+    // 타이머 스레드
+    pthread_create(&timer_thread, NULL, timer_task, NULL);
 
     pthread_join(nfc_thread, NULL);
-    pthread_join(nfc_timer_thread, NULL);
+    pthread_join(timer_thread, NULL);
 
     pthread_mutex_destroy(&flag_mutex);
-    pthread_mutex_destroy(&mid);
+    pthread_mutex_destroy(&timer_mutex);
     serialClose(fd_serial);
     return 0;
 }
