@@ -14,17 +14,15 @@
 
 // 설정값들
 int min_time = 8;   // 최소 대기 시간 (초 단위 예제용)
-int max_time = 13;   // 최대 대기 시간 (초 단위 예제용)
-int first_time = 10; // 첫 복용 시간 (24시간 형식)
-int max_count = 3;   // 하루 복용 횟수 제한
+int max_time = 20;  // 최대 대기 시간 (초 단위 예제용)
+int max_count = 3;  // 하루 복용 횟수 제한
 
 int today_count = 0; // 오늘 복용 횟수
-int total_count = 0; // 총 복용 횟수
 int flag = 0;        // 복용 가능 플래그
 int nfc_flag = 0;    // NFC 인증 플래그
 
-pthread_mutex_t flag_mutex; // 복용 가능 여부 제어용 mutex
-pthread_mutex_t mid;        // 타이머 및 상태 제어용 mutex
+pthread_mutex_t flag_mutex; // 플래그 제어 mutex
+pthread_mutex_t mid;        // 타이머 및 상태 제어 mutex
 
 static const char* UART2_DEV = "/dev/ttyAMA0"; // UART2
 extern char** environ;
@@ -72,82 +70,77 @@ void music(int gpio) {
     }
 }
 
-// 타이머 스레드 함수들
-void* take_min(void* arg) {
-    sleep(min_time);
-    pthread_mutex_lock(&mid);
-    flag = 1;
-    pthread_mutex_unlock(&mid);
-    printf("알림: 최소 대기 시간 지나 복용 가능\n");
-    return NULL;
-}
-
-void* take_max(void* arg) {
-    sleep(max_time);
-    pthread_mutex_lock(&mid);
-    if (flag == 1) {
-        printf("알림: 최대 대기 시간 도달\n");
-        music(18);
-    }
-    pthread_mutex_unlock(&mid);
-    return NULL;
-}
-
-void* first_take(void* arg) {
+// NFC 인증 및 대기 처리
+void* nfc_timer_task(void* arg) {
+    int fd = *(int*)arg;
     while (1) {
-        time_t now = time(NULL);
-        struct tm* current_time = localtime(&now);
-        pthread_mutex_lock(&mid);
-        if (current_time->tm_sec == first_time - 1) {
-            flag = 1;
-            printf("알림: 하루 첫 복용 가능\n");
+        pthread_mutex_lock(&flag_mutex);
+        if (nfc_flag == 1) {
+            pthread_mutex_unlock(&flag_mutex);
+
+            // 최대 대기 시간 대기
+            printf("최대 대기 시간(%d초) 대기 중...\n", max_time);
+            sleep(max_time);
+
+            pthread_mutex_lock(&mid);
+            if (today_count >= max_count) {
+                printf("복용 횟수 초과, 부저 울림\n");
+                music(18); // 복용 제한 시 알림음 출력
+                nfc_flag = 0; // NFC 플래그 초기화
+            } else {
+                printf("비밀번호 입력 대기 중...\n");
+                flag = 1; // 복용 가능 플래그 설정
+            }
+            pthread_mutex_unlock(&mid);
+        } else {
+            pthread_mutex_unlock(&flag_mutex);
         }
-        if (current_time->tm_sec == first_time && flag == 1) {
-            printf("알림: 하루 첫 복용 마감\n");
-            music(18);
-        }
-        pthread_mutex_unlock(&mid);
-        sleep(1);
+        delay(500); // 주기적 확인
     }
     return NULL;
 }
 
-void timer() {
-    pthread_t min_thread, max_thread, first_thread;
-    pthread_mutex_lock(&mid);
-    if (flag == 1) {
-        flag = 0;
+// 블루투스 입력 함수
+int bluetooth_input(int fd) {
+    char buffer[100]; // 비밀번호 입력 버퍼
+    int index = 0;
+    char dat;
 
-        // 스텝모터 작동(시계방향, 8칸 => 45도)
-        one_two_Phase_Rotate_Angle(45, 0);
-        printf("스텝모터 동작\n");
+    send_message(fd, "비밀번호를 입력해주세요");
 
-        today_count++;
-        total_count++;
-        printf("복용 완료, 오늘 복용 횟수: %d\n", today_count);
-        if (today_count < max_count) {
-            pthread_create(&min_thread, NULL, take_min, NULL);
-            pthread_create(&max_thread, NULL, take_max, NULL);
+    memset(buffer, '\0', sizeof(buffer)); // 버퍼 초기화
 
-            pthread_detach(min_thread);
-            pthread_detach(max_thread);
-        } else {
-            today_count = 0;
-            pthread_create(&first_thread, NULL, first_take, NULL);
-            pthread_detach(first_thread);
+    while (1) {
+        if (serialDataAvail(fd)) {
+            dat = serialGetchar(fd);
+            if (dat == '\n' || dat == '\r') { // 줄바꿈 문자로 입력 완료 확인
+                buffer[index] = '\0';
+                if (strcmp(buffer, "1234") == 0) { // 비밀번호 검증
+                    printf("블루투스 입력 성공\n");
+                    return 1; // 성공
+                } else {
+                    printf("잘못된 비밀번호 입력\n");
+                    send_message(fd, "잘못된 비밀번호입니다. 다시 입력해주세요");
+                    memset(buffer, '\0', sizeof(buffer)); // 버퍼 초기화
+                    index = 0;
+                }
+            } else {
+                if (index < sizeof(buffer) - 1) {
+                    buffer[index++] = dat;
+                }
+            }
         }
-    } else {
-        printf("조건 불만족\n");
-        music(18);
+        delay(10);
     }
-    pthread_mutex_unlock(&mid);
+    return 0;
 }
 
-// NFC 감지 스레드
+// NFC 태그 및 처리 스레드
 void* nfc_task(void* arg) {
     pid_t pid;
     int status;
     char* argv[] = { "nfc-poll", NULL };
+    int fd = *(int*)arg;
 
     while (1) {
         pthread_mutex_lock(&flag_mutex);
@@ -159,10 +152,28 @@ void* nfc_task(void* arg) {
                     pthread_mutex_lock(&flag_mutex);
                     nfc_flag = 1; // NFC 인증 성공
                     pthread_mutex_unlock(&flag_mutex);
-                    printf("NFC 인증 성공\n");
 
-                    // 타이머 실행
-                    timer();
+                    pthread_mutex_lock(&mid);
+                    if (today_count < max_count && flag == 1) {
+                        pthread_mutex_unlock(&mid);
+
+                        if (bluetooth_input(fd)) {
+                            printf("조건 충족: 모터 작동\n");
+                            one_two_Phase_Rotate_Angle(45, 1); // 스텝모터 45도 회전
+                            pthread_mutex_lock(&mid);
+                            today_count++; // 복용 횟수 증가
+                            printf("복용 완료: 오늘 복용 횟수 = %d\n", today_count);
+                            pthread_mutex_unlock(&mid);
+                        }
+                    } else {
+                        pthread_mutex_unlock(&mid);
+                        printf("복용 제한: 부저 울림\n");
+                        music(18);
+                    }
+
+                    pthread_mutex_lock(&flag_mutex);
+                    nfc_flag = 0; // NFC 플래그 초기화
+                    pthread_mutex_unlock(&flag_mutex);
                 }
             } else {
                 perror("nfc-poll 실행 실패");
@@ -170,13 +181,19 @@ void* nfc_task(void* arg) {
         } else {
             pthread_mutex_unlock(&flag_mutex);
         }
-        sleep(1); // NFC 감지 주기
+        sleep(1);
     }
     return NULL;
 }
 
 int main() {
+    int fd_serial;
+
     if (wiringPiSetupGpio() < 0) return 1;
+    if ((fd_serial = serialOpen(UART2_DEV, BAUD_RATE)) < 0) {
+        printf("UART 초기화 실패\n");
+        return 1;
+    }
 
     pthread_mutex_init(&flag_mutex, NULL);
     pthread_mutex_init(&mid, NULL);
@@ -186,15 +203,19 @@ int main() {
         pinMode(pin_arr[i], OUTPUT);
     }
 
-    pthread_t nfc_thread;
+    pthread_t nfc_thread, nfc_timer_thread;
 
     // NFC 처리 스레드
-    pthread_create(&nfc_thread, NULL, nfc_task, NULL);
+    pthread_create(&nfc_thread, NULL, nfc_task, &fd_serial);
+
+    // NFC 타이머 처리 스레드
+    pthread_create(&nfc_timer_thread, NULL, nfc_timer_task, &fd_serial);
 
     pthread_join(nfc_thread, NULL);
+    pthread_join(nfc_timer_thread, NULL);
 
     pthread_mutex_destroy(&flag_mutex);
     pthread_mutex_destroy(&mid);
-
+    serialClose(fd_serial);
     return 0;
 }
