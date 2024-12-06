@@ -52,12 +52,14 @@ void one_two_Phase_Rotate_Angle(float angle, int dir) {
 
 // 블루투스 입력 함수
 int bluetooth_input(int fd) {
-    char buffer[100];
-    int index = 0;
+    char buffer[100]; // 비밀번호 입력 버퍼
+    int index = 0;    // 버퍼 인덱스 초기화
     char dat;
 
     // 비밀번호 입력 안내 메시지 전송
     send_message(fd, "비밀번호를 입력해주세요");
+
+    memset(buffer, '\0', sizeof(buffer)); // 버퍼 명시적으로 초기화
 
     while (1) {
         if (serialDataAvail(fd)) {
@@ -70,8 +72,8 @@ int bluetooth_input(int fd) {
                 } else {
                     printf("잘못된 비밀번호 입력\n");
                     send_message(fd, "잘못된 비밀번호입니다. 다시 입력해주세요");
-                    index = 0; // 입력 초기화
-                    memset(buffer, '\0', sizeof(buffer));
+                    memset(buffer, '\0', sizeof(buffer)); // 잘못된 입력 후 버퍼 초기화
+                    index = 0; // 인덱스 초기화
                 }
             } else {
                 if (index < sizeof(buffer) - 1) { // 버퍼 오버플로 방지
