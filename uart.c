@@ -98,30 +98,25 @@ void* bluetooth_task(void* arg) {
             while (1) {
                 if (serialDataAvail(fd)) {
                     dat = serialGetchar(fd);
-                    if (dat == '\n' || dat == '\r') {
-                        buffer[index] = '\0';
-                        if (strcmp(buffer, "1234") == 0) {
+                    if (dat == '\n' || dat == '\r') { // 줄바꿈 문자로 입력 완료 확인
+                        buffer[index] = '\0'; // 문자열 종료
+                        if (strcmp(buffer, "1234") == 0) { // 비밀번호 검증
                             pthread_mutex_lock(&flag_mutex);
                             bluetooth_flag = 1; // 블루투스 입력 성공
                             pthread_mutex_unlock(&flag_mutex);
                             printf("블루투스 입력 성공\n");
                             break;
                         } else {
-                            // 잘못된 입력 시 플래그 초기화
-                            pthread_mutex_lock(&flag_mutex);
-                            printf("잘못된 비밀번호 입력: NFC 초기화\n");
-                            nfc_flag = 0;
-                            bluetooth_flag = 0;
-                            pthread_mutex_unlock(&flag_mutex);
-
-                            // 다시 NFC부터 시작
-                            send_message(fd, "잘못된 비밀번호입니다. 다시 NFC를 태그하세요.");
-                            break;
+                            // 잘못된 비밀번호 처리
+                            send_message(fd, "잘못된 비밀번호입니다. 다시 입력해주세요");
                         }
-                        memset(buffer, '\0', sizeof(buffer));
-                        index = 0;
+                        // 입력 초기화
+                        memset(buffer, '\0', sizeof(buffer)); // 버퍼 초기화
+                        index = 0; // 인덱스 초기화
                     } else {
-                        buffer[index++] = dat;
+                        if (index < sizeof(buffer) - 1) { // 버퍼 오버플로 방지
+                            buffer[index++] = dat;
+                        }
                     }
                 }
                 delay(10);
