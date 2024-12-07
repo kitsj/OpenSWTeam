@@ -1,4 +1,4 @@
-// NFC 감지 스레드
+// NFC 감지 스레드에서 약 복용 횟수와 남은 시간 전달
 void* nfc_task(void* arg) {
     pid_t pid;
     int status;
@@ -17,17 +17,30 @@ void* nfc_task(void* arg) {
                     pthread_mutex_unlock(&flag_mutex);
                     printf("NFC 인증 성공\n");
 
-                    time_t now = time(NULL); // 현재 시간 확인
+                    time_t now = time(NULL);
 
                     // 복용 간격 및 복용 횟수 확인
                     pthread_mutex_lock(&flag_mutex);
                     if (m_count >= MAX_COUNT) {
                         printf("하루 약 복용 횟수를 초과했습니다. 부저 울림\n");
-                        music(18); // 복용 제한 알림음
+                        send_message(fd, "복용 횟수를 초과했습니다.");
+                        music(18);
+                        nfc_flag = 0;
+                        pthread_mutex_unlock(&flag_mutex);
+                        continue;
                     } else if (difftime(now, last_dose_time) < INTERVAL_TIME) {
                         int remaining = INTERVAL_TIME - (int)difftime(now, last_dose_time);
                         printf("복용 간격 충족되지 않음: %d초 남음. 부저 울림\n", remaining);
-                        music(18); // 간격 제한 알림음
+
+                        // 남은 시간 블루투스 전송
+                        char message[100];
+                        sprintf(message, "복용 간격 충족되지 않음: %d초 남음.", remaining);
+                        send_message(fd, message);
+
+                        music(18);
+                        nfc_flag = 0;
+                        pthread_mutex_unlock(&flag_mutex);
+                        continue;
                     } else {
                         pthread_mutex_unlock(&flag_mutex);
 
@@ -39,10 +52,17 @@ void* nfc_task(void* arg) {
                             pthread_mutex_lock(&flag_mutex);
                             m_count++;               // 복용 횟수 증가
                             last_dose_time = now;    // 마지막 복용 시간 갱신
+
+                            // 약 복용 횟수와 상태 전송
+                            char message[100];
+                            sprintf(message, "복용 완료. 현재 복용 횟수: %d/%d", m_count, MAX_COUNT);
+                            send_message(fd, message);
+
                             printf("약 복용 횟수 %d\n", m_count);
                             pthread_mutex_unlock(&flag_mutex);
                         }
                     }
+
                     pthread_mutex_lock(&flag_mutex);
                     nfc_flag = 0; // NFC 플래그 초기화 (다시 감지 가능)
                     pthread_mutex_unlock(&flag_mutex);
