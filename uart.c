@@ -134,6 +134,11 @@ void* nfc_task(void* arg) {
                         int remaining = INTERVAL_TIME - (int)difftime(now, last_dose_time);
                         printf("복용 간격 충족되지 않음: %d초 남음. 부저 울림\n", remaining);
                         music(18);
+
+                        // NFC 감지가 다시 가능하도록 플래그 초기화
+                        nfc_flag = 0;
+                        pthread_mutex_unlock(&flag_mutex);
+                        continue; // 루프 재시작
                     } else {
                         pthread_mutex_unlock(&flag_mutex);
 
